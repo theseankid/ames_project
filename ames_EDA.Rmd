@@ -1,0 +1,300 @@
+---
+title: "Come explore Ames, IA with me"
+author: Sean Ippolito
+date: "8 May 2019"
+output: rmarkdown::github_document
+---
+
+## Introduction
+
+I want to show you what it's like to do a data science project. Most of the time I see short projects that only talk about one step in the data science pipeline and jump between datasets. I won't do it all at once because any comprehensive project and be as big and as in depth as you want it to be. However, I will stick to one dataset and show the data analysis and modeling pipeline from start to finish with all the associated problems and solutions on the way. Things I want to highlight are:
+
+1. Exploratory Data Analysis (EDA)
+2. Modeling data
+3. Comparing models
+
+## What am I doing here?
+
+In this document I will do exploratory data analysis and get us ready to find good ways to model housing prices. I will also do some light feature engineering. The main questions I have going forward are:
+
+1. How does location impact housing prices 
+2. How can we use location to help us model prices accurately?
+
+I will explore this data and these question on this and following documents.
+
+```{r setup, include=FALSE}
+##knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(scales)
+library(gridExtra)
+library(dplyr)
+library(GGally)
+library(AmesHousing)
+ames <- make_ames()
+```
+
+##  Set-up and Importing Data
+
+The data is collected on sales of homes from Ames, IA. It was originally collected by Dean De Cock, but Max Kuhn cleaned it up and released it as an R package `AmesHousing`. The `AmesHousing` package has both the raw and cleaned versions of the data. Here we will import the cleaned version with the `make_ames()` function since it is immediately ready for data analysis, *but* our work isn't done, we will still have to select and engineer some features to get where we want to be.
+
+I will import packages for the data, analysis, and exploration. The `AmesHousing` library gives us the data we will use, the rest is for exploratory data analysis.
+
+```{r}
+library(ggplot2)
+library(scales)
+library(gridExtra)
+library(dplyr)
+library(GGally)
+library(AmesHousing)
+ames <- make_ames()
+```
+
+## Exploring the data
+
+First I want to see what data in general and the housing proces look like.
+
+```{r}
+dim(ames)
+unique(sapply(ames,class))
+summary(ames$Sale_Price)
+```
+
+### Exploring Sale Price
+
+So we have factor, numeric, and integer variables. What is nice is that we wont have to do any text processing. On the downside, some factor variables might have many levels, so we will have to determine what may or may not be useful for us. Lets take a closer look at the sale price.
+
+```{r, echo=FALSE}
+g1 <- ggplot(ames, aes(Sale_Price)) + geom_density(kernel = "gaussian", aes(col = "black")) +
+  stat_function(fun=dnorm, args=list(mean=mean(ames$Sale_Price), sd=sd(ames$Sale_Price)), aes(col="blue") ) +
+  geom_vline(aes(xintercept =  mean(ames$Sale_Price), col = "red") ) +
+  geom_vline(aes(xintercept =  median(ames$Sale_Price), col = "grey45") ) +
+  scale_color_manual(labels = c("KDE","Est. Norm Dist.", "Median", "Mean"), values = c("black", "blue", "grey45", "red")) +
+  ggtitle("Density plot of Sale Price") +
+  scale_x_continuous(labels = dollar)
+
+g2 <- ggplot(ames, aes(sample = Sale_Price)) +
+  stat_qq() + stat_qq_line(color = "red") +
+  scale_y_continuous(labels = dollar) +
+  ggtitle("QQ-plot for Sale Price")
+grid.arrange(g1, g2, nrow=2)
+```
+
+The upper plot shows estimated distribution of the data. It is positiveley (right) skewed as the tail is on the right, and the mean is to the right of the median. Also, in the qqplot, the red line represents sitting on a normal distribution, which this is clearly far away from. A standard trick is to do the log transformation (or some appropriate concave transformation) of the data for the right-skewness.
+
+I also have a feeling the irregularity has something to do with location or lot features so I will color the next qqplot by zoning
+
+```{r, echo= FALSE}
+ames <- ames %>% mutate(log10_SP = log10(Sale_Price))
+
+g1 <- ggplot(ames, aes(log10(Sale_Price))) + geom_density(kernel = "gaussian", aes(col = "black")) +
+  stat_function(fun=dnorm, args=list(mean=mean(log10(ames$Sale_Price)), sd=sd(log10(ames$Sale_Price))), aes(col="blue") ) +
+  geom_vline(aes(xintercept =  mean(log10(ames$Sale_Price)), col = "red") ) +
+  geom_vline(aes(xintercept =  median(log10(ames$Sale_Price)), col = "grey45") ) +
+  scale_color_manual(labels = c("KDE","Est. Norm Dist.", "Median", "Mean"), values = c("black", "blue", "grey45", "red")) +
+  ggtitle("Density plot of the log10 of Sale Price") +
+  scale_x_continuous(labels = dollar)
+
+g2 <- ggplot(ames, aes(sample = log10_SP)) +
+  stat_qq() + stat_qq_line(color = "red") +
+  scale_y_continuous(labels = dollar) +
+  ggtitle("QQ-plot for the log10 of Sale Price")
+grid.arrange(g1, g2, nrow=2)
+```
+
+**Much better.** It's not perfect, but we can work with this for now.
+
+### Exploring Locational Features
+
+Now everyone says location matters, is it true here?
+
+The variables dealing with location are Longitude, Latitude, Condition, Neighborhood, and arguably Zoning. The file `amesdoc.txt` in the `ames_project` repo contains all the descriptions for each variable. Lets see how Sale Price varies with each of these.
+
+```{r, echo= FALSE}
+ggplot() + geom_point(data=ames, aes(x=Longitude,y=Latitude), size = 1, alpha = .5) +
+  stat_summary_2d(data=ames, aes(x = Longitude, y = Latitude, z = Sale_Price), alpha=.5) +
+  scale_fill_gradient(name = "Sale_Price", low = "green", high = "red", labels = dollar) +
+  ggtitle("Plot of Location vs Avg. Sale Price")
+
+my_fn <- function(data, mapping, ...){
+  p <- ggplot(data = data, mapping = mapping) + 
+    geom_density2d(alpha = .75, color = "red") + 
+    geom_point(alpha = .25, size = 1) + 
+    geom_smooth(method=lm, color="blue", alpha = .5, ...)
+  p
+}
+pairs_col1 <- c("log10_SP","Longitude", "Latitude")
+ggpairs(ames, columns = pairs_col1,lower = list(continuous = my_fn))
+```
+
+The above plots show a few things:
+
+1) longitude and latitude are not strongly correlated with each other, but they are with Sale Price
+2) linear relationships don't fit all that well
+3) there is spatial irregularity in sale price
+
+Now to explore other locational features.
+
+```{r}
+ames %>% group_by(Condition_1) %>% summarize( 
+  count = n(), mean = mean(Sale_Price),median = median(Sale_Price), min = min(Sale_Price), max = max(Sale_Price))
+ggplot(ames, aes(x = Longitude, y = Latitude, col=Condition_1)) + geom_point()
+
+levels(ames$Neighborhood)[levels(ames$Neighborhood)=="South_and_West_of_Iowa_State_University"] <- "SW_of_ISU"
+levels(ames$Neighborhood)[levels(ames$Neighborhood)=="Iowa_DOT_and_Rail_Road"] <- "Iowa_DOT_and_RR"
+table(ames$Neighborhood)
+ggplot(ames, aes(x = Longitude, y = Latitude, col = Neighborhood)) + geom_point() +
+  guides(col = guide_legend(ncol = 1))
+```
+
+There seems to be lots of spatial variability with condition, and neighbohoods have some very small groups which might cause issues in building models. Now lets look at Zoning.
+
+```{r, echo = FALSE}
+ames %>% group_by(MS_Zoning) %>% summarize(
+  count = n(), mean = mean(Sale_Price),median = median(Sale_Price), min = min(Sale_Price), max = max(Sale_Price))
+```
+
+Industrial, Commercial, and Agricultural prices seem much lower than the rest. Since we are focusing on Housing Prices, lets drop the Agricultural, Commercial, and Industrial Sales. We will filter out the non-residential observations, check that they were eliminated properly, and then remove the extra factor levels.
+
+```{r}
+# filters out the non-residential sales
+idx_Zoning <- grepl("Res", ames$MS_Zoning)
+ames <- ames[idx_Zoning,]
+ames$MS_Zoning <- droplevels(ames$MS_Zoning)
+dim(ames)
+table(ames$MS_Zoning)
+
+# makes a Multicolored QQ-Plot
+make_qq <- function(dd, x) {
+  dd<-dd[order(dd[[x]]), ]
+  dd$qq <- qnorm(ppoints(nrow(dd)))
+  dd
+}
+ggplot(make_qq(ames, "log10_SP")) + 
+  geom_point(aes(x=qq, y=log10_SP, color=MS_Zoning)) + 
+  labs(x="Theoretical",y="Observed") +
+  stat_qq_line(aes(sample = ames$log10_SP), color = "red") +
+  ggtitle("QQ-plot for Log10 Sale_Price colored by Zoning Classification")
+
+
+ames %>% group_by(MS_Zoning) %>% summarize(
+  count = n(), mean = mean(Sale_Price),median = median(Sale_Price), min = min(Sale_Price), max = max(Sale_Price))
+ggplot(ames, aes(x = Longitude, y = Latitude, col=MS_Zoning)) + geom_point()
+ggplot(ames, aes(x = MS_Zoning, y = Sale_Price)) + 
+  geom_boxplot(width = 0.3) + 
+  scale_y_log10(labels=dollar)+
+  coord_trans(y = "log10") + 
+  xlab("Zoning") + 
+  ylab("Sale Price") +
+  coord_flip()
+```
+
+Now I will test if Zoning and Location significantly explain the variance in house price.
+
+```{r}
+lm0 <- lm(log10(Sale_Price)~ 1, data = ames)
+lm1 <- lm(log10(Sale_Price) ~ MS_Zoning, data = ames)
+lm2 <- lm(log10(Sale_Price)~ Longitude , data = ames)
+lm3 <- lm(log10(Sale_Price)~ Latitude, data = ames)
+lm4 <- lm(log10(Sale_Price)~ Longitude + Latitude, data = ames)
+lm5 <- lm(log10(Sale_Price)~ MS_Zoning + Longitude + Latitude, data = ames)
+
+anova(lm0,lm1, lm2, lm3, lm4, lm5)
+```
+Our intuition was right, the ANOVA tests confidently tell us that location matters so we will use it in our models.
+
+### Exploring Other Variables
+
+```{r}
+sum(ames$Wood_Deck_SF == 0) 
+sum(ames$Open_Porch_SF == 0)
+sum(ames$Enclosed_Porch == 0)
+sum(ames$Three_season_porch == 0)
+sum(ames$Screen_Porch == 0)
+```
+
+Not every house has a porch or deck but it is a desirable feature. I' wi'll combine porch and deck area into one continuous variable because they are somewhat sparse.
+
+```{r}
+ames <- ames %>% mutate(Porch_Deck_SF = Wood_Deck_SF + Open_Porch_SF + Enclosed_Porch + Three_season_porch + Screen_Porch)
+sum(ames$Porch_Deck_SF ==0)
+```
+
+Let's look at some of the continuous features and see if we need to do any feature engineering.
+
+```{r}
+pairs_col2 <- c("log10_SP","Total_Bsmt_SF", "Gr_Liv_Area", "Garage_Area", "Porch_Deck_SF","Lot_Area", "Lot_Frontage")
+# this function adds a 2d density estimation
+# and a line of best fit between the interacting variables
+my_fn <- function(data, mapping, ...){
+  p <- ggplot(data = data, mapping = mapping) + 
+    geom_density2d(alpha = .75, color = "red") + 
+    geom_point(alpha = .25, size = 1) + 
+    geom_smooth(method=lm, color="blue", alpha = .5, ...)
+  p
+}
+ggpairs(ames, columns = pairs_col2,lower = list(continuous = my_fn))
+```
+
+There doesn't seem to be much nonlinearity, so we will leave these features alone. Also note, these features are pretty right skewed, however, since they are the independent variables/predictors we don't have to worry so much about their distributions.
+
+```{r}
+ggplot(ames, aes(x=Year_Built, y = Sale_Price)) + geom_point(aes(alpha = .25), show.legend = FALSE) +
+  geom_smooth(method = lm) + geom_smooth(method = lm, formula = y ~ poly(x, 2), col = "red") + scale_y_log10(labels=dollar)
+
+ggplot(ames, aes(x=Year_Remod_Add, y = Sale_Price)) + geom_point(aes(alpha = .25), show.legend = FALSE) +
+  geom_smooth(method = lm) + geom_smooth(method = lm, formula = y ~ poly(x, 2), col = "red") + scale_y_log10(labels=dollar)
+```
+
+These variables seem to behave okay and there seems to be a somewhat strong relationship between the year built and sale price so we will keep them. It seems like there might be some heteroskedasticity, but we wont worry about it for now. When we model housing prices in the future we will see if this is a problem.
+
+To pick discrete variables, I do analysis like shown below. I look at how balanced the classes are, what their distributions looks like, consider what other variables capture that same information, etc.
+
+```{r}
+ames %>% group_by(Heating) %>% summarize(count = n(), mean = mean(Sale_Price), median = median(Sale_Price))
+ames %>% group_by(Fireplaces) %>% summarize(count = n(), mean = mean(Sale_Price), median = median(Sale_Price))
+ames %>% group_by(Central_Air) %>% summarize(count = n(), mean = mean(Sale_Price), median = median(Sale_Price))
+ggplot(ames, aes(Sale_Price)) + geom_density(kernel = "gaussian") + geom_rug(alpha = .1) +
+  scale_x_log10(labels = dollar) + facet_grid(Central_Air ~.) +
+  ggtitle("Sale Price and wether or not a house has Central Air")
+```
+
+I excluded some variables that were highly unbalanced. Other variables I excluded because a related variable could provide information about it. For a pretty straighforward example: I chose to keep Garage_Area but I am dropping Garage_Cars since a large garage would imply that you can fit many cars in it.
+
+## Engineered Features.
+
+Based on my observations I engineered some features either to condense or capture relvant information. I already created `Porch_Deck_SF`. Here is a few more:
+
+```{r}
+ames$Fireplace <- ifelse(ames$Fireplaces > 0, TRUE, FALSE)
+ames$Half_Baths <- ifelse(ames$Half_Bath > 0, TRUE, FALSE)
+levels(ames$Garage_Type) <- c("Attached", "Other", "Other", "Other", "Detached", "Other", "No_Garage")
+```
+
+
+## Selecting Features
+
+I leave fetures like Bedrooms and Kitchens out because `TotRms_AbvGrd` captures all of that information. What I keep is shown in the select command:
+
+```{r}
+ames <- ames %>% dplyr::select(Sale_Price,
+                               # continuous
+                               Longitude, Latitude, Lot_Area, Gr_Liv_Area, Total_Bsmt_SF, Garage_Area, Porch_Deck_SF,
+                               Bsmt_Full_Bath, Full_Bath, TotRms_AbvGrd, Year_Built, Year_Remod_Add,
+                               # factor
+                               MS_Zoning, Bldg_Type, Garage_Type, Central_Air, Fireplace, Half_Baths)
+
+```
+
+
+## What is next?
+
+Next time I will start to build models, especially ones that take into account location. I significantly decresed the number of parameters the dataset, starting from 2390 x 81 (= 193590) and ending with 2901 x 19 (=55119), which is almost a quarter of the original size. What is remarkable is that since some of the factor variables removed had up to 10 levels, removing those variables  will save us a lot on computational resources when we build models.
+
+Let's save the file for future use and call it quits.
+```{r}
+write.csv(ames, file = "ames.csv")
+```
+
+## Notes.
+
+More exploratory data analysis, and the ames dataset documentation can be found in the `ames_project` repo.
